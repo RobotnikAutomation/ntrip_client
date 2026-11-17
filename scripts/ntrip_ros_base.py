@@ -95,14 +95,25 @@ class NTRIPRosBase(Node):
     # Connect the client
     if not self._client.connect():
       self.get_logger().error('Unable to connect')
-      return False
     # Setup our subscribers
     self._nmea_sub = self.create_subscription(Sentence, 'nmea', self.subscribe_nmea, 10)
     self._fix_sub = self.create_subscription(NavSatFix, 'fix', self.subscribe_fix, 10)
 
     # Start the timer that will check for RTCM data
     self._rtcm_timer = self.create_timer(0.1, self.publish_rtcm)
+    # add 2 seconds to reconnect attempt to prevent race condition with other reconnection attempts
+    self._reconnect_timer = self.create_timer(2.0 + self._reconnect_attempt_wait_seconds, self.reconnect_if_needed)
+    self.get_logger().warning('Timer for reconnection at {} seconds'.format(2.0 + self._reconnect_attempt_wait_seconds))
     return True
+  
+  def reconnect_if_needed(self):
+
+    if not self._client._connected:
+      self.get_logger().warning('NTRIP client is not connected. Attempting to reconnect')
+      try:
+        self._client.connect()
+      except Exception as e:
+        self.get_logger().error('Reconnect failed: {}'.format(e))
 
   def stop(self):
     self.get_logger().info('Stopping RTCM publisher')
@@ -158,11 +169,17 @@ class NTRIPRosBase(Node):
     nmea_sentence = f"{nmea_sentence_no_checksum}*{nmea_checksum:x}\r\n"
 
     # Send the sentence to the client
-    self._client.send_nmea(nmea_sentence)
+    if self._client._connected:
+      self._client.send_nmea(nmea_sentence)
+    else:
+      self.get_logger().warning('NTRIP client is not connected, unable to send NMEA sentence', throttle_duration_sec=5.0)
 
   def publish_rtcm(self):
-    for raw_rtcm in self._client.recv_rtcm():
-      self._rtcm_pub.publish(self._create_rtcm_message(raw_rtcm))
+    if self._client._connected:
+      for raw_rtcm in self._client.recv_rtcm():
+        self._rtcm_pub.publish(self._create_rtcm_message(raw_rtcm))
+    else:
+      self.get_logger().warning('NTRIP client is not connected, unable to publish RTCM message', throttle_duration_sec=5.0)
 
   def _create_mavros_msgs_rtcm_message(self, rtcm):
     return mavros_msgs_RTCM(
